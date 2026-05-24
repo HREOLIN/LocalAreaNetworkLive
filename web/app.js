@@ -264,6 +264,12 @@ async function handleSignal(message) {
     case "hand-raised":
       handleHandRaised(message);
       break;
+    case "screen-share-started":
+      handleScreenShareStarted(message);
+      break;
+    case "screen-share-stopped":
+      handleScreenShareStopped(message);
+      break;
     case "error":
       handleServerError(message);
       break;
@@ -372,6 +378,22 @@ function handleServerError(message) {
   log(`服务端错误: ${payload.message || "unknown error"}`);
 }
 
+function handleScreenShareStarted(message) {
+  const payload = parsePayload(message.data);
+  const participant = state.participants.get(message.from);
+  log(
+    `${participant ? participant.displayName : payload.displayName || message.from} 开始共享屏幕`,
+  );
+}
+
+function handleScreenShareStopped(message) {
+  const payload = parsePayload(message.data);
+  const participant = state.participants.get(message.from);
+  log(
+    `${participant ? participant.displayName : payload.userId || message.from} 停止共享屏幕`,
+  );
+}
+
 async function createOfferForParticipant(userId) {
   const pc = await ensurePeerConnection(userId);
   const offer = await pc.createOffer();
@@ -386,15 +408,14 @@ async function createOfferForParticipant(userId) {
 async function ensurePeerConnection(userId) {
   const existing = state.peers.get(userId);
   if (existing) {
+    ensureMediaTransceivers(existing);
     return existing;
   }
 
   const pc = new RTCPeerConnection(rtcConfig);
   state.peers.set(userId, pc);
-
-  for (const track of state.localStream.getTracks()) {
-    pc.addTrack(track, state.localStream);
-  }
+  ensureMediaTransceivers(pc);
+  await syncPeerSenders(pc);
 
   pc.addEventListener("icecandidate", (event) => {
     if (!event.candidate) {
@@ -428,6 +449,57 @@ async function ensurePeerConnection(userId) {
   });
 
   return pc;
+}
+
+function ensureMediaTransceivers(pc) {
+  if (typeof pc.addTransceiver !== "function" || typeof pc.getTransceivers !== "function") {
+    return;
+  }
+
+  const transceivers = pc.getTransceivers();
+  const hasAudio = transceivers.some((transceiver) => transceiver.receiver.track.kind === "audio");
+  const hasVideo = transceivers.some((transceiver) => transceiver.receiver.track.kind === "video");
+
+  if (!hasAudio) {
+    pc.addTransceiver("audio", { direction: "sendrecv" });
+  }
+  if (!hasVideo) {
+    pc.addTransceiver("video", { direction: "sendrecv" });
+  }
+}
+
+function findSenderByKind(pc, kind) {
+  if (typeof pc.getTransceivers === "function") {
+    const transceiver = pc
+      .getTransceivers()
+      .find((item) => item.sender && item.receiver.track.kind === kind);
+    if (transceiver) {
+      return transceiver.sender;
+    }
+  }
+  return pc.getSenders().find((sender) => sender.track && sender.track.kind === kind) || null;
+}
+
+async function syncPeerSenders(pc) {
+  const videoTrack = state.localStream.getVideoTracks()[0] || null;
+  const audioTrack = state.localStream.getAudioTracks()[0] || null;
+  const tasks = [];
+
+  const videoSender = findSenderByKind(pc, "video");
+  if (videoSender) {
+    tasks.push(videoSender.replaceTrack(videoTrack));
+  } else if (videoTrack) {
+    tasks.push(pc.addTrack(videoTrack, state.localStream));
+  }
+
+  const audioSender = findSenderByKind(pc, "audio");
+  if (audioSender) {
+    tasks.push(audioSender.replaceTrack(audioTrack));
+  } else if (audioTrack) {
+    tasks.push(pc.addTrack(audioTrack, state.localStream));
+  }
+
+  await Promise.all(tasks);
 }
 
 function sendSignal(type, { to = "", data = null } = {}) {
@@ -752,9 +824,9 @@ function stopScreenStreamOnly() {
 async function replaceOutgoingTracks({ videoTrack, audioTrack }) {
   const tasks = [];
   for (const peer of state.peers.values()) {
-    const senders = peer.getSenders();
-    const videoSender = senders.find((sender) => sender.track && sender.track.kind === "video");
-    const audioSender = senders.find((sender) => sender.track && sender.track.kind === "audio");
+    ensureMediaTransceivers(peer);
+    const videoSender = findSenderByKind(peer, "video");
+    const audioSender = findSenderByKind(peer, "audio");
 
     if (videoSender) {
       tasks.push(videoSender.replaceTrack(videoTrack));
