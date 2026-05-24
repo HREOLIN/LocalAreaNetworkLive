@@ -1,0 +1,870 @@
+const els = {
+  serviceStatus: document.getElementById("serviceStatus"),
+  activeRoomId: document.getElementById("activeRoomId"),
+  participantCount: document.getElementById("participantCount"),
+  displayName: document.getElementById("displayName"),
+  userId: document.getElementById("userId"),
+  roomTitle: document.getElementById("roomTitle"),
+  roomId: document.getElementById("roomId"),
+  roomLink: document.getElementById("roomLink"),
+  createRoomBtn: document.getElementById("createRoomBtn"),
+  joinRoomBtn: document.getElementById("joinRoomBtn"),
+  leaveRoomBtn: document.getElementById("leaveRoomBtn"),
+  toggleAudioBtn: document.getElementById("toggleAudioBtn"),
+  toggleVideoBtn: document.getElementById("toggleVideoBtn"),
+  shareScreenBtn: document.getElementById("shareScreenBtn"),
+  raiseHandBtn: document.getElementById("raiseHandBtn"),
+  copyLinkBtn: document.getElementById("copyLinkBtn"),
+  refreshRoomBtn: document.getElementById("refreshRoomBtn"),
+  participantList: document.getElementById("participantList"),
+  videoGrid: document.getElementById("videoGrid"),
+  localVideo: document.getElementById("localVideo"),
+  localShareTag: document.getElementById("localShareTag"),
+  localRoleTag: document.getElementById("localRoleTag"),
+  localMeta: document.getElementById("localMeta"),
+  connectionState: document.getElementById("connectionState"),
+  logOutput: document.getElementById("logOutput"),
+  clearLogBtn: document.getElementById("clearLogBtn"),
+  toast: document.getElementById("toast"),
+};
+
+const state = {
+  roomId: "",
+  role: "member",
+  socket: null,
+  localParticipant: null,
+  participants: new Map(),
+  peers: new Map(),
+  remoteStreams: new Map(),
+  localStream: null,
+  cameraStream: null,
+  screenStream: null,
+  isScreenSharing: false,
+  handRaised: false,
+};
+
+const rtcConfig = {
+  iceServers: [],
+};
+
+boot();
+
+function boot() {
+  seedDefaults();
+  bindEvents();
+  checkHealth();
+  hydrateFromQuery();
+  updateShareUI();
+  renderParticipants();
+}
+
+function seedDefaults() {
+  if (!els.displayName.value) {
+    els.displayName.value = `用户${Math.floor(Math.random() * 900 + 100)}`;
+  }
+  if (!els.userId.value) {
+    els.userId.value = `user-${crypto.randomUUID().slice(0, 8)}`;
+  }
+}
+
+function bindEvents() {
+  els.createRoomBtn.addEventListener("click", createRoom);
+  els.joinRoomBtn.addEventListener("click", joinRoom);
+  els.leaveRoomBtn.addEventListener("click", leaveRoom);
+  els.toggleAudioBtn.addEventListener("click", toggleAudio);
+  els.toggleVideoBtn.addEventListener("click", toggleVideo);
+  els.shareScreenBtn.addEventListener("click", toggleScreenShare);
+  els.raiseHandBtn.addEventListener("click", toggleHandRaise);
+  els.copyLinkBtn.addEventListener("click", copyRoomLink);
+  els.refreshRoomBtn.addEventListener("click", refreshRoom);
+  els.clearLogBtn.addEventListener("click", () => {
+    els.logOutput.textContent = "";
+  });
+  window.addEventListener("beforeunload", leaveRoom);
+}
+
+async function checkHealth() {
+  try {
+    const response = await fetch("/healthz");
+    if (!response.ok) {
+      throw new Error("服务不可用");
+    }
+    els.serviceStatus.textContent = "在线";
+  } catch (error) {
+    els.serviceStatus.textContent = "不可用";
+    log(`服务健康检查失败: ${error.message}`);
+  }
+}
+
+function hydrateFromQuery() {
+  const params = new URLSearchParams(window.location.search);
+  const roomId = params.get("roomId");
+  const name = params.get("name");
+  if (roomId) {
+    els.roomId.value = roomId;
+  }
+  if (name) {
+    els.displayName.value = name;
+  }
+}
+
+function getIdentity() {
+  const displayName = els.displayName.value.trim();
+  const userId = els.userId.value.trim();
+  if (!displayName || !userId) {
+    throw new Error("昵称和用户 ID 都不能为空");
+  }
+  return { displayName, userId };
+}
+
+async function createRoom() {
+  try {
+    const { userId } = getIdentity();
+    const response = await fetch("/api/rooms", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: els.roomTitle.value.trim(),
+        hostId: userId,
+      }),
+    });
+    if (!response.ok) {
+      throw new Error((await response.json()).error || "创建房间失败");
+    }
+    const room = await response.json();
+    els.roomId.value = room.id;
+    toast(`会议已创建，房间号 ${room.id}`);
+    log(`房间已创建: ${room.id}`);
+    await joinRoom();
+  } catch (error) {
+    toast(error.message, true);
+    log(`创建会议失败: ${error.message}`);
+  }
+}
+
+async function joinRoom() {
+  try {
+    if (state.socket) {
+      toast("你已经在会议中");
+      return;
+    }
+
+    const identity = getIdentity();
+    const roomId = els.roomId.value.trim();
+    if (!roomId) {
+      throw new Error("请输入房间 ID");
+    }
+
+    const summary = await fetchRoomSummary(roomId);
+    state.role = summary.hostId === identity.userId ? "host" : "member";
+    await ensureLocalMedia();
+    openSocket(roomId, identity);
+  } catch (error) {
+    toast(error.message, true);
+    log(`加入会议失败: ${error.message}`);
+  }
+}
+
+async function fetchRoomSummary(roomId) {
+  const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({ error: "房间不存在" }));
+    throw new Error(payload.error || "房间不存在");
+  }
+  return response.json();
+}
+
+async function ensureLocalMedia() {
+  if (state.localStream) {
+    return state.localStream;
+  }
+
+  try {
+    state.cameraStream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: { width: 1280, height: 720 },
+    });
+    state.localStream = state.cameraStream;
+    els.localVideo.srcObject = state.localStream;
+    els.localMeta.textContent = trackSummary(state.localStream);
+    log("本地媒体采集成功");
+  } catch (error) {
+    state.cameraStream = new MediaStream();
+    state.localStream = new MediaStream();
+    els.localVideo.srcObject = null;
+    els.localMeta.textContent = "未检测到可用摄像头或麦克风，当前以无媒体模式入会";
+    els.toggleAudioBtn.disabled = true;
+    els.toggleVideoBtn.disabled = true;
+    toast("未检测到媒体设备，将以无音视频模式加入会议", true);
+    log(`本地媒体采集失败，切换为无媒体模式: ${error.message}`);
+  }
+  return state.localStream;
+}
+
+function openSocket(roomId, identity) {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const query = new URLSearchParams({
+    roomId,
+    userId: identity.userId,
+    name: identity.displayName,
+    role: state.role,
+  });
+  const socket = new WebSocket(`${protocol}//${window.location.host}/ws?${query.toString()}`);
+  state.socket = socket;
+  state.roomId = roomId;
+
+  socket.addEventListener("open", () => {
+    syncMeetingState();
+    log(`WebSocket 已连接，加入房间 ${roomId}`);
+  });
+
+  socket.addEventListener("message", async (event) => {
+    try {
+      const message = JSON.parse(event.data);
+      await handleSignal(message);
+    } catch (error) {
+      log(`解析消息失败: ${error.message}`);
+    }
+  });
+
+  socket.addEventListener("close", () => {
+    log("信令连接已关闭");
+    cleanupSocketState();
+  });
+
+  socket.addEventListener("error", () => {
+    toast("信令连接异常", true);
+    log("WebSocket 发生异常");
+  });
+}
+
+async function handleSignal(message) {
+  switch (message.type) {
+    case "welcome":
+      await handleWelcome(message);
+      break;
+    case "peer-joined":
+      await handlePeerJoined(message);
+      break;
+    case "peer-left":
+      handlePeerLeft(message);
+      break;
+    case "offer":
+      await handleOffer(message);
+      break;
+    case "answer":
+      await handleAnswer(message);
+      break;
+    case "ice-candidate":
+      await handleICECandidate(message);
+      break;
+    case "mute-changed":
+      handleMuteChanged(message);
+      break;
+    case "hand-raised":
+      handleHandRaised(message);
+      break;
+    case "error":
+      handleServerError(message);
+      break;
+    default:
+      log(`收到未处理消息: ${message.type}`);
+  }
+}
+
+async function handleWelcome(message) {
+  const payload = parsePayload(message.data);
+  state.localParticipant = payload.self || null;
+  state.participants.clear();
+  for (const participant of payload.participants || []) {
+    state.participants.set(participant.userId, participant);
+  }
+
+  updateLocalRole();
+  updateRoomLink();
+  renderParticipants();
+  toast(`已进入房间 ${message.roomId}`);
+
+  const others = (payload.participants || []).filter(
+    (participant) => participant.userId !== state.localParticipant.userId,
+  );
+  for (const participant of others) {
+    await createOfferForParticipant(participant.userId);
+  }
+}
+
+async function handlePeerJoined(message) {
+  const participant = parsePayload(message.data);
+  state.participants.set(participant.userId, participant);
+  renderParticipants();
+  log(`${participant.displayName} 已加入会议`);
+}
+
+function handlePeerLeft(message) {
+  const payload = parsePayload(message.data);
+  const participant = state.participants.get(payload.userId);
+  if (participant) {
+    log(`${participant.displayName} 已离开会议`);
+  }
+  state.participants.delete(payload.userId);
+  closePeer(payload.userId);
+  removeRemoteTile(payload.userId);
+  renderParticipants();
+}
+
+async function handleOffer(message) {
+  const pc = await ensurePeerConnection(message.from);
+  const offer = parsePayload(message.data);
+  await pc.setRemoteDescription(offer);
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  sendSignal("answer", {
+    to: message.from,
+    data: pc.localDescription,
+  });
+  log(`已响应 ${message.from} 的 offer`);
+}
+
+async function handleAnswer(message) {
+  const pc = state.peers.get(message.from);
+  if (!pc) {
+    return;
+  }
+  const answer = parsePayload(message.data);
+  await pc.setRemoteDescription(answer);
+  log(`已接收 ${message.from} 的 answer`);
+}
+
+async function handleICECandidate(message) {
+  const pc = await ensurePeerConnection(message.from);
+  const candidate = parsePayload(message.data);
+  if (candidate) {
+    await pc.addIceCandidate(candidate);
+  }
+}
+
+function handleMuteChanged(message) {
+  const payload = parsePayload(message.data);
+  const participant = state.participants.get(message.from);
+  if (!participant) {
+    return;
+  }
+  participant.audioMuted = !!payload.audioMuted;
+  participant.videoMuted = !!payload.videoMuted;
+  state.participants.set(message.from, participant);
+  renderParticipants();
+}
+
+function handleHandRaised(message) {
+  const payload = parsePayload(message.data);
+  const participant = state.participants.get(message.from);
+  if (!participant) {
+    return;
+  }
+  participant.handRaised = !!payload.handRaised;
+  state.participants.set(message.from, participant);
+  renderParticipants();
+}
+
+function handleServerError(message) {
+  const payload = parsePayload(message.data);
+  toast(payload.message || "服务器返回错误", true);
+  log(`服务端错误: ${payload.message || "unknown error"}`);
+}
+
+async function createOfferForParticipant(userId) {
+  const pc = await ensurePeerConnection(userId);
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  sendSignal("offer", {
+    to: userId,
+    data: pc.localDescription,
+  });
+  log(`已向 ${userId} 发起 offer`);
+}
+
+async function ensurePeerConnection(userId) {
+  const existing = state.peers.get(userId);
+  if (existing) {
+    return existing;
+  }
+
+  const pc = new RTCPeerConnection(rtcConfig);
+  state.peers.set(userId, pc);
+
+  for (const track of state.localStream.getTracks()) {
+    pc.addTrack(track, state.localStream);
+  }
+
+  pc.addEventListener("icecandidate", (event) => {
+    if (!event.candidate) {
+      return;
+    }
+    sendSignal("ice-candidate", {
+      to: userId,
+      data: event.candidate,
+    });
+  });
+
+  pc.addEventListener("track", (event) => {
+    const [stream] = event.streams;
+    if (!stream) {
+      return;
+    }
+    state.remoteStreams.set(userId, stream);
+    upsertRemoteTile(userId, stream);
+    const participant = state.participants.get(userId);
+    log(`收到 ${participant ? participant.displayName : userId} 的远端媒体流`);
+  });
+
+  pc.addEventListener("connectionstatechange", () => {
+    const participant = state.participants.get(userId);
+    log(
+      `与 ${participant ? participant.displayName : userId} 的连接状态: ${pc.connectionState}`,
+    );
+    if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+      removeRemoteTile(userId);
+    }
+  });
+
+  return pc;
+}
+
+function sendSignal(type, { to = "", data = null } = {}) {
+  if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  state.socket.send(
+    JSON.stringify({
+      type,
+      to,
+      data,
+    }),
+  );
+}
+
+function syncMeetingState() {
+  els.leaveRoomBtn.disabled = false;
+  const hasAudio = state.localStream && state.localStream.getAudioTracks().length > 0;
+  const hasVideo = state.localStream && state.localStream.getVideoTracks().length > 0;
+  els.toggleAudioBtn.disabled = !hasAudio;
+  els.toggleVideoBtn.disabled = !hasVideo;
+  els.shareScreenBtn.disabled = !canShareScreen();
+  els.raiseHandBtn.disabled = false;
+  els.copyLinkBtn.disabled = false;
+  els.refreshRoomBtn.disabled = false;
+  els.activeRoomId.textContent = state.roomId;
+  els.connectionState.textContent = "已连接";
+  updateShareUI();
+}
+
+async function leaveRoom() {
+  stopScreenStreamOnly();
+  if (state.socket) {
+    const socket = state.socket;
+    state.socket = null;
+    try {
+      socket.close();
+    } catch (_) {
+    }
+  }
+
+  for (const peer of state.peers.values()) {
+    peer.close();
+  }
+  state.peers.clear();
+  state.remoteStreams.clear();
+  Array.from(document.querySelectorAll(".video-tile.remote")).forEach((node) => node.remove());
+
+  cleanupSocketState();
+  renderParticipants();
+}
+
+function cleanupSocketState() {
+  state.socket = null;
+  state.roomId = "";
+  state.role = "member";
+  state.localParticipant = null;
+  state.participants.clear();
+  state.screenStream = null;
+  state.isScreenSharing = false;
+  state.handRaised = false;
+  els.leaveRoomBtn.disabled = true;
+  els.toggleAudioBtn.disabled = true;
+  els.toggleVideoBtn.disabled = true;
+  els.shareScreenBtn.disabled = true;
+  els.raiseHandBtn.disabled = true;
+  els.copyLinkBtn.disabled = true;
+  els.refreshRoomBtn.disabled = true;
+  els.activeRoomId.textContent = "未加入";
+  els.participantCount.textContent = "0";
+  els.connectionState.textContent = "未连接";
+  els.localRoleTag.textContent = "未加入";
+  updateRoomLink();
+  updateShareUI();
+}
+
+async function refreshRoom() {
+  if (!els.roomId.value.trim()) {
+    return;
+  }
+  try {
+    const summary = await fetchRoomSummary(els.roomId.value.trim());
+    state.participants.clear();
+    for (const participant of summary.participants || []) {
+      state.participants.set(participant.userId, participant);
+    }
+    renderParticipants();
+    log("已刷新房间成员");
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function updateLocalRole() {
+  els.localRoleTag.textContent = state.role === "host" ? "主持人" : "成员";
+}
+
+function updateRoomLink() {
+  if (!state.roomId) {
+    els.roomLink.value = "尚未生成";
+    return;
+  }
+  const url = new URL(window.location.href);
+  url.searchParams.set("roomId", state.roomId);
+  url.searchParams.set("name", els.displayName.value.trim());
+  els.roomLink.value = url.toString();
+}
+
+async function copyRoomLink() {
+  if (!state.roomId) {
+    return;
+  }
+  await navigator.clipboard.writeText(els.roomLink.value);
+  toast("会议链接已复制");
+}
+
+function renderParticipants() {
+  const participants = Array.from(state.participants.values()).sort((a, b) =>
+    a.joinedAt > b.joinedAt ? 1 : -1,
+  );
+  els.participantCount.textContent = String(participants.length);
+  els.participantList.innerHTML = "";
+
+  if (!participants.length) {
+    const li = document.createElement("li");
+    li.className = "empty-state";
+    li.textContent = "当前还没有成员加入。";
+    els.participantList.appendChild(li);
+    return;
+  }
+
+  for (const participant of participants) {
+    const li = document.createElement("li");
+    li.className = "participant-item";
+    li.innerHTML = `
+      <div class="participant-top">
+        <span class="participant-name">${escapeHTML(participant.displayName)}</span>
+        <span class="participant-meta">${participant.role === "host" ? "主持人" : "成员"}</span>
+      </div>
+      <div class="participant-tags">
+        ${participant.audioMuted ? '<span class="tag">麦克风关闭</span>' : ""}
+        ${participant.videoMuted ? '<span class="tag">摄像头关闭</span>' : ""}
+        ${participant.handRaised ? '<span class="tag">已举手</span>' : ""}
+        ${
+          state.localParticipant && participant.userId === state.localParticipant.userId
+            ? '<span class="mini-tag">你自己</span>'
+            : ""
+        }
+      </div>
+      <div class="participant-meta">${escapeHTML(participant.userId)}</div>
+    `;
+    els.participantList.appendChild(li);
+  }
+}
+
+function upsertRemoteTile(userId, stream) {
+  const participant = state.participants.get(userId);
+  let tile = document.getElementById(`remote-${userId}`);
+  if (!tile) {
+    tile = document.createElement("article");
+    tile.className = "video-tile remote";
+    tile.id = `remote-${userId}`;
+    tile.innerHTML = `
+      <div class="tile-head">
+        <span>${escapeHTML(participant ? participant.displayName : userId)}</span>
+        <span class="mini-tag">远端</span>
+      </div>
+      <video autoplay playsinline></video>
+      <div class="tile-meta">${escapeHTML(participant ? participant.userId : userId)}</div>
+    `;
+    els.videoGrid.appendChild(tile);
+  }
+  const video = tile.querySelector("video");
+  video.srcObject = stream;
+}
+
+function removeRemoteTile(userId) {
+  const tile = document.getElementById(`remote-${userId}`);
+  if (tile) {
+    tile.remove();
+  }
+}
+
+function closePeer(userId) {
+  const pc = state.peers.get(userId);
+  if (!pc) {
+    return;
+  }
+  pc.close();
+  state.peers.delete(userId);
+}
+
+function toggleAudio() {
+  const targetStream = state.cameraStream || state.localStream;
+  if (!targetStream || targetStream.getAudioTracks().length === 0) {
+    return;
+  }
+  const enabled = toggleTracks(targetStream.getAudioTracks());
+  els.toggleAudioBtn.textContent = enabled ? "关闭麦克风" : "打开麦克风";
+  els.localMeta.textContent = trackSummary(state.localStream);
+  sendMuteChanged();
+}
+
+function toggleVideo() {
+  const targetStream = state.isScreenSharing ? state.screenStream : state.cameraStream;
+  if (!targetStream || targetStream.getVideoTracks().length === 0) {
+    return;
+  }
+  const enabled = toggleTracks(targetStream.getVideoTracks());
+  els.toggleVideoBtn.textContent = enabled ? "关闭摄像头" : "打开摄像头";
+  els.localMeta.textContent = trackSummary(state.localStream);
+  sendMuteChanged();
+}
+
+async function toggleScreenShare() {
+  if (state.isScreenSharing) {
+    await stopScreenShare();
+    return;
+  }
+
+  try {
+    if (!canShareScreen()) {
+      throw new Error("当前浏览器不支持屏幕共享");
+    }
+    const screenStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: true,
+    });
+    await startScreenShare(screenStream);
+  } catch (error) {
+    toast(error.message || "共享屏幕失败", true);
+    log(`共享屏幕失败: ${error.message}`);
+  }
+}
+
+async function startScreenShare(screenStream) {
+  const screenVideoTrack = screenStream.getVideoTracks()[0];
+  if (!screenVideoTrack) {
+    throw new Error("未获取到桌面视频轨道");
+  }
+
+  state.screenStream = screenStream;
+  state.isScreenSharing = true;
+
+  const audioTracks = [];
+  if (state.cameraStream && state.cameraStream.getAudioTracks().length > 0) {
+    audioTracks.push(...state.cameraStream.getAudioTracks());
+  } else if (screenStream.getAudioTracks().length > 0) {
+    audioTracks.push(...screenStream.getAudioTracks());
+  }
+
+  state.localStream = new MediaStream([...audioTracks, screenVideoTrack]);
+  els.localVideo.srcObject = state.localStream;
+  els.localMeta.textContent = `正在共享桌面 / ${trackSummary(state.localStream)}`;
+  els.toggleVideoBtn.textContent = "停止画面";
+
+  screenVideoTrack.addEventListener("ended", () => {
+    stopScreenShare();
+  });
+
+  await replaceOutgoingTracks({
+    videoTrack: screenVideoTrack,
+    audioTrack: audioTracks[0] || null,
+  });
+
+  updateShareUI();
+  sendSignal("screen-share-started", {
+    data: {
+      userId: state.localParticipant ? state.localParticipant.userId : "",
+      displayName: state.localParticipant ? state.localParticipant.displayName : "",
+    },
+  });
+  sendMuteChanged();
+  log("已开始共享桌面");
+  toast("屏幕共享已开始");
+}
+
+async function stopScreenShare() {
+  if (!state.isScreenSharing) {
+    return;
+  }
+
+  stopScreenStreamOnly();
+  state.isScreenSharing = false;
+
+  const fallback = state.cameraStream && state.cameraStream.getTracks().length > 0
+    ? state.cameraStream
+    : new MediaStream();
+  state.localStream = fallback;
+  els.localVideo.srcObject = fallback.getTracks().length > 0 ? fallback : null;
+  els.localMeta.textContent = trackSummary(fallback);
+  els.toggleVideoBtn.textContent = "关闭摄像头";
+
+  const nextVideo = fallback.getVideoTracks()[0] || null;
+  const nextAudio = fallback.getAudioTracks()[0] || null;
+  await replaceOutgoingTracks({
+    videoTrack: nextVideo,
+    audioTrack: nextAudio,
+  });
+
+  updateShareUI();
+  sendSignal("screen-share-stopped", {
+    data: {
+      userId: state.localParticipant ? state.localParticipant.userId : "",
+    },
+  });
+  sendMuteChanged();
+  log("已停止共享桌面");
+  toast("屏幕共享已停止");
+}
+
+function stopScreenStreamOnly() {
+  if (!state.screenStream) {
+    return;
+  }
+  for (const track of state.screenStream.getTracks()) {
+    track.stop();
+  }
+  state.screenStream = null;
+}
+
+async function replaceOutgoingTracks({ videoTrack, audioTrack }) {
+  const tasks = [];
+  for (const peer of state.peers.values()) {
+    const senders = peer.getSenders();
+    const videoSender = senders.find((sender) => sender.track && sender.track.kind === "video");
+    const audioSender = senders.find((sender) => sender.track && sender.track.kind === "audio");
+
+    if (videoSender) {
+      tasks.push(videoSender.replaceTrack(videoTrack));
+    } else if (videoTrack) {
+      tasks.push(peer.addTrack(videoTrack, state.localStream));
+    }
+
+    if (audioSender) {
+      tasks.push(audioSender.replaceTrack(audioTrack));
+    } else if (audioTrack) {
+      tasks.push(peer.addTrack(audioTrack, state.localStream));
+    }
+  }
+  await Promise.all(tasks);
+}
+
+function toggleTracks(tracks) {
+  if (!tracks.length) {
+    return false;
+  }
+  const nextEnabled = !tracks[0].enabled;
+  for (const track of tracks) {
+    track.enabled = nextEnabled;
+  }
+  return nextEnabled;
+}
+
+function sendMuteChanged() {
+  const payload = {
+    audioMuted: !state.localStream || state.localStream.getAudioTracks().length === 0
+      ? true
+      : state.localStream.getAudioTracks().every((track) => !track.enabled),
+    videoMuted: !state.localStream || state.localStream.getVideoTracks().length === 0
+      ? true
+      : state.localStream.getVideoTracks().every((track) => !track.enabled),
+  };
+  if (state.localParticipant) {
+    const updated = { ...state.localParticipant, ...payload };
+    state.localParticipant = updated;
+    state.participants.set(updated.userId, updated);
+    renderParticipants();
+  }
+  sendSignal("mute-changed", { data: payload });
+}
+
+function toggleHandRaise() {
+  state.handRaised = !state.handRaised;
+  els.raiseHandBtn.textContent = state.handRaised ? "放下手" : "举手";
+  if (state.localParticipant) {
+    state.localParticipant.handRaised = state.handRaised;
+    state.participants.set(state.localParticipant.userId, state.localParticipant);
+    renderParticipants();
+  }
+  sendSignal("hand-raised", { data: { handRaised: state.handRaised } });
+}
+
+function updateShareUI() {
+  els.localShareTag.classList.toggle("hidden", !state.isScreenSharing);
+  els.shareScreenBtn.textContent = state.isScreenSharing ? "停止共享" : "共享屏幕";
+  if (!state.roomId) {
+    els.shareScreenBtn.textContent = "共享屏幕";
+  }
+}
+
+function canShareScreen() {
+  return !!(
+    navigator.mediaDevices &&
+    typeof navigator.mediaDevices.getDisplayMedia === "function"
+  );
+}
+
+function trackSummary(stream) {
+  if (!stream.getAudioTracks().length && !stream.getVideoTracks().length) {
+    return "无可用音视频设备";
+  }
+  const audioOn = stream.getAudioTracks().some((track) => track.enabled);
+  const videoOn = stream.getVideoTracks().some((track) => track.enabled);
+  return `${audioOn ? "麦克风开启" : "麦克风关闭"} / ${videoOn ? "摄像头开启" : "摄像头关闭"}`;
+}
+
+function log(message) {
+  const timestamp = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  els.logOutput.textContent += `[${timestamp}] ${message}\n`;
+  els.logOutput.scrollTop = els.logOutput.scrollHeight;
+}
+
+function toast(message, isError = false) {
+  els.toast.textContent = message;
+  els.toast.style.color = isError ? "var(--danger)" : "var(--accent-warm)";
+}
+
+function escapeHTML(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function parsePayload(payload) {
+  if (!payload) {
+    return {};
+  }
+  if (typeof payload === "string") {
+    try {
+      return JSON.parse(payload);
+    } catch (_) {
+      return {};
+    }
+  }
+  return payload;
+}

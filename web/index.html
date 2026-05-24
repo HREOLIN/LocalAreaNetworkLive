@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LAN Meeting</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">LAN MEETING</p>
+          <h1>局域网会议控制台</h1>
+          <p class="hero-copy">
+            面向内网场景的轻量会议页。支持创建会议、加入房间、浏览器音视频采集和
+            WebRTC 点对点协商。
+          </p>
+        </div>
+        <div class="hero-card">
+          <div class="status-row">
+            <span>服务状态</span>
+            <strong id="serviceStatus">检查中</strong>
+          </div>
+          <div class="status-row">
+            <span>当前房间</span>
+            <strong id="activeRoomId">未加入</strong>
+          </div>
+          <div class="status-row">
+            <span>在线成员</span>
+            <strong id="participantCount">0</strong>
+          </div>
+        </div>
+      </header>
+
+      <main class="layout">
+        <section class="panel control-panel">
+          <h2>会议入口</h2>
+          <div class="field-grid">
+            <label class="field">
+              <span>昵称</span>
+              <input id="displayName" type="text" placeholder="例如：张三" maxlength="24" />
+            </label>
+            <label class="field">
+              <span>用户 ID</span>
+              <input id="userId" type="text" placeholder="例如：zhangsan" maxlength="32" />
+            </label>
+            <label class="field field-wide">
+              <span>房间标题</span>
+              <input id="roomTitle" type="text" placeholder="例如：研发晨会" maxlength="48" />
+            </label>
+            <label class="field field-wide">
+              <span>房间 ID</span>
+              <input id="roomId" type="text" placeholder="输入已有房间号加入会议" maxlength="32" />
+            </label>
+          </div>
+
+          <div class="action-row">
+            <button id="createRoomBtn" class="primary">创建会议</button>
+            <button id="joinRoomBtn" class="secondary">加入会议</button>
+            <button id="leaveRoomBtn" class="ghost" disabled>离开会议</button>
+          </div>
+
+          <div class="action-row">
+            <button id="toggleAudioBtn" class="ghost" disabled>关闭麦克风</button>
+            <button id="toggleVideoBtn" class="ghost" disabled>关闭摄像头</button>
+            <button id="shareScreenBtn" class="ghost" disabled>共享屏幕</button>
+            <button id="raiseHandBtn" class="ghost" disabled>举手</button>
+          </div>
+
+          <div class="link-box">
+            <span>会议链接</span>
+            <div class="link-row">
+              <input id="roomLink" type="text" readonly value="尚未生成" />
+              <button id="copyLinkBtn" class="secondary" disabled>复制</button>
+            </div>
+          </div>
+
+          <div id="toast" class="toast" aria-live="polite"></div>
+        </section>
+
+        <section class="panel participants-panel">
+          <div class="section-head">
+            <h2>成员列表</h2>
+            <button id="refreshRoomBtn" class="text-btn" disabled>刷新</button>
+          </div>
+          <ul id="participantList" class="participant-list"></ul>
+        </section>
+
+        <section class="panel media-panel">
+          <div class="section-head">
+            <h2>音视频画面</h2>
+            <span id="connectionState" class="badge">未连接</span>
+          </div>
+          <div id="videoGrid" class="video-grid">
+            <article class="video-tile local">
+              <div class="tile-head">
+                <span>本地预览</span>
+                <div class="tile-chip-group">
+                  <span id="localShareTag" class="mini-tag hidden">共享中</span>
+                  <span id="localRoleTag" class="mini-tag">未加入</span>
+                </div>
+              </div>
+              <video id="localVideo" autoplay muted playsinline></video>
+              <div id="localMeta" class="tile-meta">等待采集设备</div>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel log-panel">
+          <div class="section-head">
+            <h2>会议日志</h2>
+            <button id="clearLogBtn" class="text-btn">清空</button>
+          </div>
+          <pre id="logOutput" class="log-output"></pre>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
