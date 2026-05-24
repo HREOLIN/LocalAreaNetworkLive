@@ -17,6 +17,11 @@ const els = {
   copyLinkBtn: document.getElementById("copyLinkBtn"),
   refreshRoomBtn: document.getElementById("refreshRoomBtn"),
   participantList: document.getElementById("participantList"),
+  stageVideo: document.getElementById("stageVideo"),
+  stageTitle: document.getElementById("stageTitle"),
+  stageMeta: document.getElementById("stageMeta"),
+  stageModeTag: document.getElementById("stageModeTag"),
+  galleryHint: document.getElementById("galleryHint"),
   videoGrid: document.getElementById("videoGrid"),
   localVideo: document.getElementById("localVideo"),
   localShareTag: document.getElementById("localShareTag"),
@@ -40,7 +45,10 @@ const state = {
   cameraStream: null,
   screenStream: null,
   isScreenSharing: false,
+  activeSharerId: "",
   handRaised: false,
+  autoJoinRequested: false,
+  refreshTimer: null,
 };
 
 const rtcConfig = {
@@ -56,6 +64,8 @@ function boot() {
   hydrateFromQuery();
   updateShareUI();
   renderParticipants();
+  renderStage();
+  scheduleAutoJoin();
 }
 
 function seedDefaults() {
@@ -100,12 +110,34 @@ function hydrateFromQuery() {
   const params = new URLSearchParams(window.location.search);
   const roomId = params.get("roomId");
   const name = params.get("name");
+  const userId = params.get("userId");
+  const autoJoin = params.get("autoJoin");
+
   if (roomId) {
     els.roomId.value = roomId;
   }
   if (name) {
     els.displayName.value = name;
   }
+  if (userId) {
+    els.userId.value = userId;
+  }
+  if (autoJoin === "1" && roomId) {
+    state.autoJoinRequested = true;
+  }
+}
+
+function scheduleAutoJoin() {
+  if (!state.autoJoinRequested) {
+    return;
+  }
+  window.setTimeout(async () => {
+    if (state.socket) {
+      return;
+    }
+    toast("检测到会议链接，正在自动加入...");
+    await joinRoom();
+  }, 150);
 }
 
 function getIdentity() {
@@ -198,6 +230,7 @@ async function ensureLocalMedia() {
     toast("未检测到媒体设备，将以无音视频模式加入会议", true);
     log(`本地媒体采集失败，切换为无媒体模式: ${error.message}`);
   }
+  renderStage();
   return state.localStream;
 }
 
@@ -289,6 +322,7 @@ async function handleWelcome(message) {
   updateLocalRole();
   updateRoomLink();
   renderParticipants();
+  renderStage();
   toast(`已进入房间 ${message.roomId}`);
 
   const others = (payload.participants || []).filter(
@@ -303,6 +337,7 @@ async function handlePeerJoined(message) {
   const participant = parsePayload(message.data);
   state.participants.set(participant.userId, participant);
   renderParticipants();
+  renderStage();
   log(`${participant.displayName} 已加入会议`);
 }
 
@@ -313,9 +348,13 @@ function handlePeerLeft(message) {
     log(`${participant.displayName} 已离开会议`);
   }
   state.participants.delete(payload.userId);
+  if (state.activeSharerId === payload.userId) {
+    state.activeSharerId = "";
+  }
   closePeer(payload.userId);
   removeRemoteTile(payload.userId);
   renderParticipants();
+  renderStage();
 }
 
 async function handleOffer(message) {
@@ -359,6 +398,7 @@ function handleMuteChanged(message) {
   participant.videoMuted = !!payload.videoMuted;
   state.participants.set(message.from, participant);
   renderParticipants();
+  renderStage();
 }
 
 function handleHandRaised(message) {
@@ -372,26 +412,28 @@ function handleHandRaised(message) {
   renderParticipants();
 }
 
-function handleServerError(message) {
-  const payload = parsePayload(message.data);
-  toast(payload.message || "服务器返回错误", true);
-  log(`服务端错误: ${payload.message || "unknown error"}`);
-}
-
 function handleScreenShareStarted(message) {
   const payload = parsePayload(message.data);
+  state.activeSharerId = message.from;
+  renderStage();
   const participant = state.participants.get(message.from);
-  log(
-    `${participant ? participant.displayName : payload.displayName || message.from} 开始共享屏幕`,
-  );
+  log(`${participant ? participant.displayName : payload.displayName || message.from} 开始共享屏幕`);
 }
 
 function handleScreenShareStopped(message) {
   const payload = parsePayload(message.data);
+  if (state.activeSharerId === message.from) {
+    state.activeSharerId = "";
+  }
+  renderStage();
   const participant = state.participants.get(message.from);
-  log(
-    `${participant ? participant.displayName : payload.userId || message.from} 停止共享屏幕`,
-  );
+  log(`${participant ? participant.displayName : payload.userId || message.from} 停止共享屏幕`);
+}
+
+function handleServerError(message) {
+  const payload = parsePayload(message.data);
+  toast(payload.message || "服务器返回错误", true);
+  log(`服务端错误: ${payload.message || "unknown error"}`);
 }
 
 async function createOfferForParticipant(userId) {
@@ -428,23 +470,20 @@ async function ensurePeerConnection(userId) {
   });
 
   pc.addEventListener("track", (event) => {
-    const [stream] = event.streams;
-    if (!stream) {
-      return;
-    }
+    const stream = getOrCreateRemoteStream(userId, event);
     state.remoteStreams.set(userId, stream);
     upsertRemoteTile(userId, stream);
+    renderStage();
     const participant = state.participants.get(userId);
     log(`收到 ${participant ? participant.displayName : userId} 的远端媒体流`);
   });
 
   pc.addEventListener("connectionstatechange", () => {
     const participant = state.participants.get(userId);
-    log(
-      `与 ${participant ? participant.displayName : userId} 的连接状态: ${pc.connectionState}`,
-    );
+    log(`与 ${participant ? participant.displayName : userId} 的连接状态: ${pc.connectionState}`);
     if (pc.connectionState === "failed" || pc.connectionState === "closed") {
       removeRemoteTile(userId);
+      renderStage();
     }
   });
 
@@ -478,6 +517,29 @@ function findSenderByKind(pc, kind) {
     }
   }
   return pc.getSenders().find((sender) => sender.track && sender.track.kind === kind) || null;
+}
+
+function getOrCreateRemoteStream(userId, event) {
+  const [existingStream] = event.streams || [];
+  if (existingStream) {
+    const cached = state.remoteStreams.get(userId);
+    if (cached && cached.id === existingStream.id) {
+      if (!cached.getTracks().some((track) => track.id === event.track.id)) {
+        cached.addTrack(event.track);
+      }
+      return cached;
+    }
+    return existingStream;
+  }
+
+  let stream = state.remoteStreams.get(userId);
+  if (!stream) {
+    stream = new MediaStream();
+  }
+  if (!stream.getTracks().some((track) => track.id === event.track.id)) {
+    stream.addTrack(event.track);
+  }
+  return stream;
 }
 
 async function syncPeerSenders(pc) {
@@ -528,6 +590,8 @@ function syncMeetingState() {
   els.activeRoomId.textContent = state.roomId;
   els.connectionState.textContent = "已连接";
   updateShareUI();
+  renderStage();
+  startRoomPolling();
 }
 
 async function leaveRoom() {
@@ -550,9 +614,11 @@ async function leaveRoom() {
 
   cleanupSocketState();
   renderParticipants();
+  renderStage();
 }
 
 function cleanupSocketState() {
+  stopRoomPolling();
   state.socket = null;
   state.roomId = "";
   state.role = "member";
@@ -560,6 +626,7 @@ function cleanupSocketState() {
   state.participants.clear();
   state.screenStream = null;
   state.isScreenSharing = false;
+  state.activeSharerId = "";
   state.handRaised = false;
   els.leaveRoomBtn.disabled = true;
   els.toggleAudioBtn.disabled = true;
@@ -587,9 +654,26 @@ async function refreshRoom() {
       state.participants.set(participant.userId, participant);
     }
     renderParticipants();
+    renderStage();
     log("已刷新房间成员");
   } catch (error) {
     toast(error.message, true);
+  }
+}
+
+function startRoomPolling() {
+  stopRoomPolling();
+  state.refreshTimer = window.setInterval(() => {
+    if (state.socket && state.roomId) {
+      refreshRoom();
+    }
+  }, 3000);
+}
+
+function stopRoomPolling() {
+  if (state.refreshTimer) {
+    window.clearInterval(state.refreshTimer);
+    state.refreshTimer = null;
   }
 }
 
@@ -605,6 +689,8 @@ function updateRoomLink() {
   const url = new URL(window.location.href);
   url.searchParams.set("roomId", state.roomId);
   url.searchParams.set("name", els.displayName.value.trim());
+  url.searchParams.set("userId", els.userId.value.trim());
+  url.searchParams.set("autoJoin", "1");
   els.roomLink.value = url.toString();
 }
 
@@ -665,7 +751,9 @@ function upsertRemoteTile(userId, stream) {
     tile.innerHTML = `
       <div class="tile-head">
         <span>${escapeHTML(participant ? participant.displayName : userId)}</span>
-        <span class="mini-tag">远端</span>
+        <span class="mini-tag">${
+          participant && participant.role === "host" ? "主持人" : "远端"
+        }</span>
       </div>
       <video autoplay playsinline></video>
       <div class="tile-meta">${escapeHTML(participant ? participant.userId : userId)}</div>
@@ -712,6 +800,7 @@ function toggleVideo() {
   els.toggleVideoBtn.textContent = enabled ? "关闭摄像头" : "打开摄像头";
   els.localMeta.textContent = trackSummary(state.localStream);
   sendMuteChanged();
+  renderStage();
 }
 
 async function toggleScreenShare() {
@@ -743,6 +832,7 @@ async function startScreenShare(screenStream) {
 
   state.screenStream = screenStream;
   state.isScreenSharing = true;
+  state.activeSharerId = state.localParticipant ? state.localParticipant.userId : "";
 
   const audioTracks = [];
   if (state.cameraStream && state.cameraStream.getAudioTracks().length > 0) {
@@ -766,6 +856,7 @@ async function startScreenShare(screenStream) {
   });
 
   updateShareUI();
+  renderStage();
   sendSignal("screen-share-started", {
     data: {
       userId: state.localParticipant ? state.localParticipant.userId : "",
@@ -784,10 +875,14 @@ async function stopScreenShare() {
 
   stopScreenStreamOnly();
   state.isScreenSharing = false;
+  if (state.localParticipant && state.activeSharerId === state.localParticipant.userId) {
+    state.activeSharerId = "";
+  }
 
-  const fallback = state.cameraStream && state.cameraStream.getTracks().length > 0
-    ? state.cameraStream
-    : new MediaStream();
+  const fallback =
+    state.cameraStream && state.cameraStream.getTracks().length > 0
+      ? state.cameraStream
+      : new MediaStream();
   state.localStream = fallback;
   els.localVideo.srcObject = fallback.getTracks().length > 0 ? fallback : null;
   els.localMeta.textContent = trackSummary(fallback);
@@ -801,6 +896,7 @@ async function stopScreenShare() {
   });
 
   updateShareUI();
+  renderStage();
   sendSignal("screen-share-stopped", {
     data: {
       userId: state.localParticipant ? state.localParticipant.userId : "",
@@ -856,18 +952,21 @@ function toggleTracks(tracks) {
 
 function sendMuteChanged() {
   const payload = {
-    audioMuted: !state.localStream || state.localStream.getAudioTracks().length === 0
-      ? true
-      : state.localStream.getAudioTracks().every((track) => !track.enabled),
-    videoMuted: !state.localStream || state.localStream.getVideoTracks().length === 0
-      ? true
-      : state.localStream.getVideoTracks().every((track) => !track.enabled),
+    audioMuted:
+      !state.localStream || state.localStream.getAudioTracks().length === 0
+        ? true
+        : state.localStream.getAudioTracks().every((track) => !track.enabled),
+    videoMuted:
+      !state.localStream || state.localStream.getVideoTracks().length === 0
+        ? true
+        : state.localStream.getVideoTracks().every((track) => !track.enabled),
   };
   if (state.localParticipant) {
     const updated = { ...state.localParticipant, ...payload };
     state.localParticipant = updated;
     state.participants.set(updated.userId, updated);
     renderParticipants();
+    renderStage();
   }
   sendSignal("mute-changed", { data: payload });
 }
@@ -891,11 +990,119 @@ function updateShareUI() {
   }
 }
 
-function canShareScreen() {
-  return !!(
-    navigator.mediaDevices &&
-    typeof navigator.mediaDevices.getDisplayMedia === "function"
+function renderStage() {
+  const stage = pickStageSource();
+  els.stageVideo.srcObject = stage.stream || null;
+  els.stageTitle.textContent = stage.title;
+  els.stageMeta.textContent = stage.meta;
+  els.stageModeTag.textContent = stage.mode;
+  els.galleryHint.textContent = stage.hint;
+  renderGallery(stage.excludeUserId || "");
+}
+
+function pickStageSource() {
+  if (state.activeSharerId) {
+    if (
+      state.localParticipant &&
+      state.activeSharerId === state.localParticipant.userId &&
+      state.localStream &&
+      state.localStream.getVideoTracks().length > 0
+    ) {
+      return {
+        stream: state.localStream,
+        title: "主舞台",
+        meta: "当前显示共享中的桌面",
+        mode: "共享屏幕",
+        hint: "其他成员画面保留在画廊中",
+        excludeUserId: state.localParticipant.userId,
+      };
+    }
+
+    const sharedStream = state.remoteStreams.get(state.activeSharerId);
+    if (sharedStream) {
+      const participant = state.participants.get(state.activeSharerId);
+      return {
+        stream: sharedStream,
+        title: participant ? `${participant.displayName} 的共享` : "共享屏幕",
+        meta: "当前显示共享中的桌面",
+        mode: "共享屏幕",
+        hint: "其他成员画面保留在画廊中",
+        excludeUserId: state.activeSharerId,
+      };
+    }
+  }
+
+  const host = Array.from(state.participants.values()).find((participant) => participant.role === "host");
+  if (host) {
+    if (
+      state.localParticipant &&
+      host.userId === state.localParticipant.userId &&
+      state.localStream &&
+      state.localStream.getVideoTracks().length > 0
+    ) {
+      return {
+        stream: state.localStream,
+        title: "主舞台",
+        meta: "当前显示房主画面",
+        mode: "主持人",
+        hint: "共享屏幕会自动切到主舞台",
+        excludeUserId: host.userId,
+      };
+    }
+
+    const hostStream = state.remoteStreams.get(host.userId);
+    if (hostStream) {
+      return {
+        stream: hostStream,
+        title: `${host.displayName} 的画面`,
+        meta: "当前显示房主画面",
+        mode: "主持人",
+        hint: "共享屏幕会自动切到主舞台",
+        excludeUserId: host.userId,
+      };
+    }
+  }
+
+  return {
+    stream: null,
+    title: "主舞台",
+    meta: "等待房主开启摄像头或共享屏幕",
+    mode: "待机",
+    hint: "当成员开启视频或共享屏幕后，画面会自动显示在这里",
+    excludeUserId: "",
+  };
+}
+
+function renderGallery(excludeUserId) {
+  for (const tile of Array.from(els.videoGrid.querySelectorAll(".video-tile.remote"))) {
+    const userId = tile.id.replace("remote-", "");
+    tile.classList.toggle("hidden", userId === excludeUserId);
+  }
+
+  const visibleTiles = Array.from(els.videoGrid.querySelectorAll(".video-tile.remote")).filter(
+    (tile) => !tile.classList.contains("hidden"),
   );
+
+  let empty = els.videoGrid.querySelector(".empty-gallery");
+  if (!visibleTiles.length) {
+    if (!empty) {
+      empty = document.createElement("div");
+      empty.className = "empty-gallery";
+      els.videoGrid.appendChild(empty);
+    }
+    empty.textContent = state.roomId
+      ? "其他成员的画面会显示在这里。"
+      : "加入会议后，成员画廊会显示其他参会者的画面。";
+    return;
+  }
+
+  if (empty) {
+    empty.remove();
+  }
+}
+
+function canShareScreen() {
+  return !!(navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === "function");
 }
 
 function trackSummary(stream) {

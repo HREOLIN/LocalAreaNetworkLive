@@ -92,8 +92,18 @@
             <h2>音视频画面</h2>
             <span id="connectionState" class="badge">未连接</span>
           </div>
-          <div id="videoGrid" class="video-grid">
-            <article class="video-tile local">
+          <section class="stage">
+            <div class="tile-head stage-head">
+              <div>
+                <span id="stageTitle">主舞台</span>
+                <div id="stageMeta" class="tile-meta light">等待房主开启画面</div>
+              </div>
+              <span id="stageModeTag" class="mini-tag">待机</span>
+            </div>
+            <video id="stageVideo" autoplay playsinline></video>
+          </section>
+          <div class="substage-grid">
+            <article class="video-tile local local-preview-tile">
               <div class="tile-head">
                 <span>本地预览</span>
                 <div class="tile-chip-group">
@@ -104,6 +114,13 @@
               <video id="localVideo" autoplay muted playsinline></video>
               <div id="localMeta" class="tile-meta">等待采集设备</div>
             </article>
+            <div>
+              <div class="gallery-head">
+                <span>成员画面</span>
+                <span id="galleryHint" class="tile-meta">共享屏幕会自动进入主舞台</span>
+              </div>
+              <div id="videoGrid" class="video-grid"></div>
+            </div>
           </div>
         </section>
 

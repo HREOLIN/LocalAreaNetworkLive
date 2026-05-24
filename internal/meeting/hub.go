@@ -15,6 +15,8 @@ type Hub struct {
 	rooms map[string]*Room
 }
 
+const roomRetention = 30 * time.Minute
+
 func NewHub() *Hub {
 	return &Hub{
 		rooms: make(map[string]*Room),
@@ -47,7 +49,7 @@ func (h *Hub) DeleteRoomIfEmpty(roomID string) {
 	if !ok {
 		return
 	}
-	if len(room.SnapshotParticipants()) == 0 {
+	if len(room.SnapshotParticipants()) == 0 && time.Since(room.CreatedAt) > roomRetention {
 		delete(h.rooms, roomID)
 	}
 }
