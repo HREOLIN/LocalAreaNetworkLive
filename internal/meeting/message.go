@@ -16,6 +16,7 @@ const (
 	EventHandRaised    = "hand-raised"
 	EventScreenStarted = "screen-share-started"
 	EventScreenStopped = "screen-share-stopped"
+	EventChatMessage   = "chat-message"
 	EventError         = "error"
 )
 

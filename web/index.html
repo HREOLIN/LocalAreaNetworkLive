@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>LAN Meeting</title>
-    <link rel="stylesheet" href="/styles.css?v=20260524-2" />
+    <link rel="stylesheet" href="/styles.css?v=20260524-3" />
   </head>
   <body>
     <div class="page-shell">
@@ -13,8 +13,8 @@
           <p class="eyebrow">LAN MEETING</p>
           <h1>局域网会议控制台</h1>
           <p class="hero-copy">
-            面向内网场景的轻量会议页，支持创建会议、加入房间、浏览器音视频采集、桌面共享和
-            WebRTC 点对点协商。
+            面向内网场景的轻量会议页，支持创建会议、加入房间、浏览器音视频采集、桌面共享、
+            文字聊天和 WebRTC 点对点协商。
           </p>
         </div>
         <div class="hero-card">
@@ -86,13 +86,35 @@
           <div id="toast" class="toast" aria-live="polite"></div>
         </section>
 
-        <section class="panel participants-panel">
-          <div class="section-head">
-            <h2>成员列表</h2>
-            <button id="refreshRoomBtn" class="text-btn" disabled>刷新</button>
-          </div>
-          <ul id="participantList" class="participant-list"></ul>
-        </section>
+        <div class="side-stack">
+          <section class="panel participants-panel">
+            <div class="section-head">
+              <h2>成员列表</h2>
+              <button id="refreshRoomBtn" class="text-btn" disabled>刷新</button>
+            </div>
+            <ul id="participantList" class="participant-list"></ul>
+          </section>
+
+          <section class="panel chat-panel">
+            <div class="section-head">
+              <h2>会议聊天</h2>
+              <span id="chatState" class="participant-meta">未连接</span>
+            </div>
+            <div id="chatMessages" class="chat-messages">
+              <div class="empty-chat">加入会议后，这里会显示聊天消息。</div>
+            </div>
+            <form id="chatForm" class="chat-form">
+              <input
+                id="chatInput"
+                type="text"
+                maxlength="200"
+                placeholder="输入消息，按回车发送"
+                disabled
+              />
+              <button id="sendChatBtn" class="primary" type="submit" disabled>发送</button>
+            </form>
+          </section>
+        </div>
 
         <section class="panel media-panel">
           <div class="section-head">
@@ -141,6 +163,6 @@
       </main>
     </div>
 
-    <script src="/app.js?v=20260524-2" defer></script>
+    <script src="/app.js?v=20260524-3" defer></script>
   </body>
 </html>

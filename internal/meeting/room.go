@@ -22,7 +22,10 @@ type Room struct {
 	CreatedAt    time.Time
 	mu           sync.RWMutex
 	participants map[string]*session
+	chatHistory  []ChatMessage
 }
+
+const chatHistoryLimit = 100
 
 func NewRoom(id, title, hostID string) *Room {
 	return &Room{
@@ -90,6 +93,25 @@ func (r *Room) SnapshotParticipants() []Participant {
 	for _, s := range r.participants {
 		out = append(out, s.participant)
 	}
+	return out
+}
+
+func (r *Room) AppendChatMessage(message ChatMessage) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.chatHistory = append(r.chatHistory, message)
+	if len(r.chatHistory) > chatHistoryLimit {
+		r.chatHistory = append([]ChatMessage(nil), r.chatHistory[len(r.chatHistory)-chatHistoryLimit:]...)
+	}
+}
+
+func (r *Room) ChatHistory() []ChatMessage {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make([]ChatMessage, len(r.chatHistory))
+	copy(out, r.chatHistory)
 	return out
 }
 

@@ -18,6 +18,11 @@ const els = {
   spawnGuestBtn: document.getElementById("spawnGuestBtn"),
   refreshRoomBtn: document.getElementById("refreshRoomBtn"),
   participantList: document.getElementById("participantList"),
+  chatMessages: document.getElementById("chatMessages"),
+  chatState: document.getElementById("chatState"),
+  chatForm: document.getElementById("chatForm"),
+  chatInput: document.getElementById("chatInput"),
+  sendChatBtn: document.getElementById("sendChatBtn"),
   stageVideo: document.getElementById("stageVideo"),
   stageTitle: document.getElementById("stageTitle"),
   stageMeta: document.getElementById("stageMeta"),
@@ -50,6 +55,7 @@ const state = {
   handRaised: false,
   autoJoinRequested: false,
   refreshTimer: null,
+  chatMessages: [],
 };
 
 const rtcConfig = {
@@ -66,6 +72,7 @@ function boot() {
   updateRoomLink();
   updateShareUI();
   renderParticipants();
+  renderChat();
   renderStage();
   scheduleAutoJoin();
 }
@@ -93,6 +100,7 @@ function bindEvents() {
   els.clearLogBtn.addEventListener("click", () => {
     els.logOutput.textContent = "";
   });
+  els.chatForm.addEventListener("submit", sendChatMessage);
 
   els.displayName.addEventListener("input", updateRoomLink);
   els.userId.addEventListener("input", updateRoomLink);
@@ -222,8 +230,16 @@ async function ensureLocalMedia() {
 
   try {
     state.cameraStream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: { width: 1280, height: 720 },
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 24, max: 30 },
+      },
     });
     state.localStream = state.cameraStream;
     els.localVideo.srcObject = state.localStream;
@@ -252,6 +268,7 @@ function openSocket(roomId, identity) {
     name: identity.displayName,
     role: state.role,
   });
+
   const socket = new WebSocket(`${protocol}//${window.location.host}/ws?${query.toString()}`);
   state.socket = socket;
   state.roomId = roomId;
@@ -286,6 +303,9 @@ async function handleSignal(message) {
     case "welcome":
       await handleWelcome(message);
       break;
+    case "participants":
+      handleParticipantsSnapshot(message);
+      break;
     case "peer-joined":
       await handlePeerJoined(message);
       break;
@@ -313,6 +333,9 @@ async function handleSignal(message) {
     case "screen-share-stopped":
       handleScreenShareStopped(message);
       break;
+    case "chat-message":
+      handleChatMessage(message);
+      break;
     case "error":
       handleServerError(message);
       break;
@@ -324,23 +347,29 @@ async function handleSignal(message) {
 async function handleWelcome(message) {
   const payload = parsePayload(message.data);
   state.localParticipant = payload.self || null;
-  state.participants.clear();
-  for (const participant of payload.participants || []) {
-    state.participants.set(participant.userId, participant);
-  }
+  syncParticipants(payload.participants || []);
+  state.chatMessages = Array.isArray(payload.messages) ? payload.messages.slice(-100) : [];
 
   updateLocalRole();
   updateRoomLink();
   renderParticipants();
+  renderChat();
   renderStage();
   toast(`已进入房间 ${message.roomId}`);
 
-  const others = (payload.participants || []).filter(
-    (participant) => participant.userId !== state.localParticipant.userId,
-  );
+  const localUserId = state.localParticipant ? state.localParticipant.userId : "";
+  const others = (payload.participants || []).filter((participant) => participant.userId !== localUserId);
   for (const participant of others) {
     await createOfferForParticipant(participant.userId);
   }
+}
+
+function handleParticipantsSnapshot(message) {
+  const payload = parsePayload(message.data);
+  syncParticipants(Array.isArray(payload) ? payload : payload.participants || []);
+  renderParticipants();
+  syncRemoteTileLabels();
+  renderStage();
 }
 
 async function handlePeerJoined(message) {
@@ -359,12 +388,12 @@ function handlePeerLeft(message) {
   }
 
   state.participants.delete(payload.userId);
+  state.remoteStreams.delete(payload.userId);
   if (state.activeSharerId === payload.userId) {
-    state.activeSharerId = "";
+    state.activeSharerId = deriveActiveSharerId();
   }
   closePeer(payload.userId);
   removeRemoteTile(payload.userId);
-  state.remoteStreams.delete(payload.userId);
   renderParticipants();
   renderStage();
 }
@@ -427,21 +456,35 @@ function handleHandRaised(message) {
 function handleScreenShareStarted(message) {
   const payload = parsePayload(message.data);
   state.activeSharerId = message.from;
-  renderStage();
   const participant = state.participants.get(message.from);
+  if (participant) {
+    participant.screenSharing = true;
+    state.participants.set(message.from, participant);
+  }
+  renderParticipants();
+  renderStage();
   const name = participant ? participant.displayName : payload.displayName || message.from;
   log(`${name} 开始共享屏幕`);
 }
 
 function handleScreenShareStopped(message) {
   const payload = parsePayload(message.data);
-  if (state.activeSharerId === message.from) {
-    state.activeSharerId = "";
-  }
-  renderStage();
   const participant = state.participants.get(message.from);
+  if (participant) {
+    participant.screenSharing = false;
+    state.participants.set(message.from, participant);
+  }
+  if (state.activeSharerId === message.from) {
+    state.activeSharerId = deriveActiveSharerId();
+  }
+  renderParticipants();
+  renderStage();
   const name = participant ? participant.displayName : payload.userId || message.from;
   log(`${name} 停止共享屏幕`);
+}
+
+function handleChatMessage(message) {
+  appendChatMessage(parsePayload(message.data));
 }
 
 function handleServerError(message) {
@@ -511,8 +554,8 @@ function ensureMediaTransceivers(pc) {
   }
 
   const transceivers = pc.getTransceivers();
-  const hasAudio = transceivers.some((transceiver) => transceiver.receiver.track.kind === "audio");
-  const hasVideo = transceivers.some((transceiver) => transceiver.receiver.track.kind === "video");
+  const hasAudio = transceivers.some((item) => item.receiver.track.kind === "audio");
+  const hasVideo = transceivers.some((item) => item.receiver.track.kind === "video");
 
   if (!hasAudio) {
     pc.addTransceiver("audio", { direction: "sendrecv" });
@@ -558,22 +601,23 @@ function getOrCreateRemoteStream(userId, event) {
 }
 
 async function syncPeerSenders(pc) {
-  const videoTrack = state.localStream.getVideoTracks()[0] || null;
-  const audioTrack = state.localStream.getAudioTracks()[0] || null;
+  const videoTrack = state.localStream ? state.localStream.getVideoTracks()[0] || null : null;
+  const audioTrack = state.localStream ? state.localStream.getAudioTracks()[0] || null : null;
   const tasks = [];
 
   const videoSender = findSenderByKind(pc, "video");
   if (videoSender) {
     tasks.push(videoSender.replaceTrack(videoTrack));
+    tasks.push(optimizeVideoSender(videoSender, state.isScreenSharing));
   } else if (videoTrack) {
-    tasks.push(pc.addTrack(videoTrack, state.localStream));
+    tasks.push(Promise.resolve(pc.addTrack(videoTrack, state.localStream)));
   }
 
   const audioSender = findSenderByKind(pc, "audio");
   if (audioSender) {
     tasks.push(audioSender.replaceTrack(audioTrack));
   } else if (audioTrack) {
-    tasks.push(pc.addTrack(audioTrack, state.localStream));
+    tasks.push(Promise.resolve(pc.addTrack(audioTrack, state.localStream)));
   }
 
   await Promise.all(tasks);
@@ -583,36 +627,34 @@ function sendSignal(type, { to = "", data = null } = {}) {
   if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
     return;
   }
-  state.socket.send(
-    JSON.stringify({
-      type,
-      to,
-      data,
-    }),
-  );
+  state.socket.send(JSON.stringify({ type, to, data }));
 }
 
 function syncMeetingState() {
-  els.leaveRoomBtn.disabled = false;
-  els.spawnGuestBtn.disabled = false;
   const hasAudio = state.localStream && state.localStream.getAudioTracks().length > 0;
   const hasVideo = state.localStream && state.localStream.getVideoTracks().length > 0;
+
+  els.leaveRoomBtn.disabled = false;
+  els.spawnGuestBtn.disabled = false;
   els.toggleAudioBtn.disabled = !hasAudio;
   els.toggleVideoBtn.disabled = !hasVideo;
   els.shareScreenBtn.disabled = !canShareScreen();
   els.raiseHandBtn.disabled = false;
   els.copyLinkBtn.disabled = false;
   els.refreshRoomBtn.disabled = false;
+  els.chatInput.disabled = false;
+  els.sendChatBtn.disabled = false;
   els.activeRoomId.textContent = state.roomId;
   els.connectionState.textContent = "已连接";
+  els.chatState.textContent = "可发送";
   updateShareUI();
   updateRoomLink();
   renderStage();
-  startRoomPolling();
 }
 
 async function leaveRoom() {
   stopScreenStreamOnly();
+
   if (state.socket) {
     const socket = state.socket;
     state.socket = null;
@@ -627,10 +669,11 @@ async function leaveRoom() {
   }
   state.peers.clear();
   state.remoteStreams.clear();
-  Array.from(document.querySelectorAll(".video-tile.remote")).forEach((node) => node.remove());
+  Array.from(els.videoGrid.querySelectorAll(".video-tile.remote")).forEach((node) => node.remove());
 
   cleanupSocketState();
   renderParticipants();
+  renderChat();
   renderStage();
 }
 
@@ -645,6 +688,8 @@ function cleanupSocketState() {
   state.isScreenSharing = false;
   state.activeSharerId = "";
   state.handRaised = false;
+  state.chatMessages = [];
+
   els.leaveRoomBtn.disabled = true;
   els.toggleAudioBtn.disabled = true;
   els.toggleVideoBtn.disabled = true;
@@ -653,9 +698,13 @@ function cleanupSocketState() {
   els.copyLinkBtn.disabled = true;
   els.spawnGuestBtn.disabled = true;
   els.refreshRoomBtn.disabled = true;
+  els.chatInput.disabled = true;
+  els.sendChatBtn.disabled = true;
+  els.chatInput.value = "";
   els.activeRoomId.textContent = "未加入";
   els.participantCount.textContent = "0";
   els.connectionState.textContent = "未连接";
+  els.chatState.textContent = "未连接";
   els.localRoleTag.textContent = "未加入";
   updateRoomLink();
   updateShareUI();
@@ -665,12 +714,10 @@ async function refreshRoom() {
   if (!els.roomId.value.trim()) {
     return;
   }
+
   try {
     const summary = await fetchRoomSummary(els.roomId.value.trim());
-    state.participants.clear();
-    for (const participant of summary.participants || []) {
-      state.participants.set(participant.userId, participant);
-    }
+    syncParticipants(summary.participants || []);
     renderParticipants();
     syncRemoteTileLabels();
     renderStage();
@@ -690,10 +737,11 @@ function startRoomPolling() {
 }
 
 function stopRoomPolling() {
-  if (state.refreshTimer) {
-    window.clearInterval(state.refreshTimer);
-    state.refreshTimer = null;
+  if (!state.refreshTimer) {
+    return;
   }
+  window.clearInterval(state.refreshTimer);
+  state.refreshTimer = null;
 }
 
 function updateLocalRole() {
@@ -706,6 +754,7 @@ function updateRoomLink() {
     els.roomLink.value = "尚未生成";
     return;
   }
+
   els.roomLink.value = buildGuestURL({
     roomId,
     name: els.displayName.value.trim() || "会议成员",
@@ -747,6 +796,7 @@ function openGuestWindow() {
     log(`浏览器拦截了测试分身窗口: ${url}`);
     return;
   }
+
   toast("测试分身已在新标签页打开");
   log("已打开测试分身页面");
 }
@@ -758,6 +808,31 @@ function buildGuestURL({ roomId, name, userId }) {
   url.searchParams.set("userId", userId);
   url.searchParams.set("autoJoin", "1");
   return url.toString();
+}
+
+function syncParticipants(participants) {
+  state.participants.clear();
+  for (const participant of participants) {
+    state.participants.set(participant.userId, participant);
+  }
+
+  if (state.localParticipant) {
+    const updatedLocal = state.participants.get(state.localParticipant.userId);
+    if (updatedLocal) {
+      state.localParticipant = updatedLocal;
+      state.handRaised = !!updatedLocal.handRaised;
+    }
+  }
+
+  state.activeSharerId = deriveActiveSharerId();
+}
+
+function deriveActiveSharerId() {
+  if (state.localParticipant && state.isScreenSharing) {
+    return state.localParticipant.userId;
+  }
+  const sharingParticipant = Array.from(state.participants.values()).find((participant) => participant.screenSharing);
+  return sharingParticipant ? sharingParticipant.userId : "";
 }
 
 function renderParticipants() {
@@ -784,6 +859,7 @@ function renderParticipants() {
         <span class="participant-meta">${participant.role === "host" ? "主持人" : "成员"}</span>
       </div>
       <div class="participant-tags">
+        ${participant.screenSharing ? '<span class="tag">共享中</span>' : ""}
         ${participant.audioMuted ? '<span class="tag">麦克风关闭</span>' : ""}
         ${participant.videoMuted ? '<span class="tag">摄像头关闭</span>' : ""}
         ${participant.handRaised ? '<span class="tag">已举手</span>' : ""}
@@ -797,6 +873,69 @@ function renderParticipants() {
     `;
     els.participantList.appendChild(li);
   }
+}
+
+function renderChat() {
+  els.chatMessages.innerHTML = "";
+
+  if (!state.chatMessages.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-chat";
+    empty.textContent = state.roomId ? "还没有聊天消息，发一条试试。" : "加入会议后，这里会显示聊天消息。";
+    els.chatMessages.appendChild(empty);
+    return;
+  }
+
+  for (const message of state.chatMessages) {
+    const item = document.createElement("article");
+    const isSelf = state.localParticipant && message.userId === state.localParticipant.userId;
+    item.className = `chat-message${isSelf ? " self" : ""}`;
+    item.innerHTML = `
+      <div class="chat-message-head">
+        <strong>${escapeHTML(message.displayName || message.userId || "匿名成员")}</strong>
+        <span>${formatChatTime(message.sentAt)}</span>
+      </div>
+      <div class="chat-message-body">${escapeHTML(message.text || "")}</div>
+    `;
+    els.chatMessages.appendChild(item);
+  }
+
+  els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+}
+
+function appendChatMessage(message) {
+  if (!message || !message.id) {
+    return;
+  }
+  if (state.chatMessages.some((item) => item.id === message.id)) {
+    return;
+  }
+  state.chatMessages.push(message);
+  state.chatMessages = state.chatMessages.slice(-100);
+  renderChat();
+  const name = message.displayName || message.userId || "成员";
+  log(`${name}: ${message.text}`);
+}
+
+async function sendChatMessage(event) {
+  event.preventDefault();
+  if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
+    toast("请先加入会议", true);
+    return;
+  }
+
+  const text = els.chatInput.value.trim();
+  if (!text) {
+    return;
+  }
+
+  sendSignal("chat-message", {
+    data: {
+      id: crypto.randomUUID(),
+      text,
+    },
+  });
+  els.chatInput.value = "";
 }
 
 function upsertRemoteTile(userId, stream) {
@@ -831,6 +970,7 @@ function syncRemoteTileLabels() {
     if (!participant) {
       continue;
     }
+
     const nameEl = tile.querySelector(".remote-name");
     const roleEl = tile.querySelector(".remote-role");
     const idEl = tile.querySelector(".remote-id");
@@ -867,6 +1007,7 @@ function toggleAudio() {
   if (!targetStream || targetStream.getAudioTracks().length === 0) {
     return;
   }
+
   const enabled = toggleTracks(targetStream.getAudioTracks());
   els.toggleAudioBtn.textContent = enabled ? "关闭麦克风" : "打开麦克风";
   els.localMeta.textContent = localMetaText();
@@ -878,6 +1019,7 @@ function toggleVideo() {
   if (!targetStream || targetStream.getVideoTracks().length === 0) {
     return;
   }
+
   const enabled = toggleTracks(targetStream.getVideoTracks());
   els.toggleVideoBtn.textContent = enabled ? "关闭摄像头" : "打开摄像头";
   els.localMeta.textContent = localMetaText();
@@ -895,8 +1037,14 @@ async function toggleScreenShare() {
     if (!canShareScreen()) {
       throw new Error("当前浏览器不支持屏幕共享");
     }
+
     const screenStream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
+      video: {
+        width: { ideal: 1920, max: 3840 },
+        height: { ideal: 1080, max: 2160 },
+        frameRate: { ideal: 30, max: 60 },
+        cursor: "always",
+      },
       audio: true,
     });
     await startScreenShare(screenStream);
@@ -910,6 +1058,21 @@ async function startScreenShare(screenStream) {
   const screenVideoTrack = screenStream.getVideoTracks()[0];
   if (!screenVideoTrack) {
     throw new Error("未获取到桌面视频轨道");
+  }
+
+  if (typeof screenVideoTrack.applyConstraints === "function") {
+    try {
+      await screenVideoTrack.applyConstraints({
+        width: 1920,
+        height: 1080,
+        frameRate: 30,
+      });
+    } catch (_) {
+    }
+  }
+
+  if ("contentHint" in screenVideoTrack) {
+    screenVideoTrack.contentHint = "motion";
   }
 
   state.screenStream = screenStream;
@@ -938,7 +1101,13 @@ async function startScreenShare(screenStream) {
   });
   await renegotiateAllPeers("screen-started");
 
+  if (state.localParticipant) {
+    state.localParticipant.screenSharing = true;
+    state.participants.set(state.localParticipant.userId, state.localParticipant);
+  }
+
   updateShareUI();
+  renderParticipants();
   renderStage();
   sendSignal("screen-share-started", {
     data: {
@@ -957,6 +1126,10 @@ async function stopScreenShare() {
   }
 
   state.isScreenSharing = false;
+  if (state.localParticipant) {
+    state.localParticipant.screenSharing = false;
+    state.participants.set(state.localParticipant.userId, state.localParticipant);
+  }
   if (state.localParticipant && state.activeSharerId === state.localParticipant.userId) {
     state.activeSharerId = "";
   }
@@ -980,6 +1153,7 @@ async function stopScreenShare() {
   await renegotiateAllPeers("screen-stopped");
 
   updateShareUI();
+  renderParticipants();
   renderStage();
   sendSignal("screen-share-stopped", {
     data: {
@@ -1010,17 +1184,40 @@ async function replaceOutgoingTracks({ videoTrack, audioTrack }) {
 
     if (videoSender) {
       tasks.push(videoSender.replaceTrack(videoTrack));
+      tasks.push(optimizeVideoSender(videoSender, !!videoTrack && state.isScreenSharing));
     } else if (videoTrack) {
-      tasks.push(peer.addTrack(videoTrack, state.localStream));
+      tasks.push(Promise.resolve(peer.addTrack(videoTrack, state.localStream)));
     }
 
     if (audioSender) {
       tasks.push(audioSender.replaceTrack(audioTrack));
     } else if (audioTrack) {
-      tasks.push(peer.addTrack(audioTrack, state.localStream));
+      tasks.push(Promise.resolve(peer.addTrack(audioTrack, state.localStream)));
     }
   }
   await Promise.all(tasks);
+}
+
+async function optimizeVideoSender(sender, isScreenSharing) {
+  if (!sender || typeof sender.getParameters !== "function" || typeof sender.setParameters !== "function") {
+    return;
+  }
+
+  try {
+    const parameters = sender.getParameters() || {};
+    const encodings = parameters.encodings && parameters.encodings.length > 0 ? parameters.encodings : [{}];
+    parameters.encodings = encodings.map((encoding) => ({
+      ...encoding,
+      maxBitrate: isScreenSharing ? 6000000 : 2000000,
+      maxFramerate: isScreenSharing ? 30 : 24,
+    }));
+    if ("degradationPreference" in parameters) {
+      parameters.degradationPreference = isScreenSharing ? "maintain-framerate" : "balanced";
+    }
+    await sender.setParameters(parameters);
+  } catch (error) {
+    log(`发送参数优化未生效: ${error.message}`);
+  }
 }
 
 async function renegotiateAllPeers(reason) {
@@ -1240,6 +1437,22 @@ function trackSummary(stream) {
   const audioOn = stream.getAudioTracks().some((track) => track.enabled);
   const videoOn = stream.getVideoTracks().some((track) => track.enabled);
   return `${audioOn ? "麦克风开启" : "麦克风关闭"} / ${videoOn ? "摄像头开启" : "摄像头关闭"}`;
+}
+
+function formatChatTime(value) {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
 }
 
 function log(message) {

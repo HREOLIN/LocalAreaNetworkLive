@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"lanmeeting/internal/meeting"
@@ -155,6 +156,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 					"userId": userID,
 				}),
 			}, userID)
+			s.broadcastParticipants(room)
 			s.hub.DeleteRoomIfEmpty(roomID)
 		}
 	}()
@@ -166,6 +168,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		Data: meeting.MustJSON(map[string]any{
 			"self":         p,
 			"participants": room.SnapshotParticipants(),
+			"messages":     room.ChatHistory(),
 		}),
 	}); err != nil {
 		return
@@ -177,6 +180,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		From:   userID,
 		Data:   meeting.MustJSON(p),
 	}, userID)
+	s.broadcastParticipants(room)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -243,8 +247,64 @@ func (s *Server) handleSignalMessage(room *meeting.Room, sender meeting.Particip
 			p.VideoMuted = payload.VideoMuted
 		})
 		room.Broadcast(msg, "")
-	case meeting.EventHandRaised, meeting.EventScreenStarted, meeting.EventScreenStopped:
+		s.broadcastParticipants(room)
+	case meeting.EventHandRaised:
+		_ = room.UpdateParticipant(sender.UserID, func(p *meeting.Participant) {
+			type handPayload struct {
+				HandRaised bool `json:"handRaised"`
+			}
+			var payload handPayload
+			_ = json.Unmarshal(msg.Data, &payload)
+			p.HandRaised = payload.HandRaised
+		})
 		room.Broadcast(msg, "")
+		s.broadcastParticipants(room)
+	case meeting.EventScreenStarted:
+		_ = room.UpdateParticipant(sender.UserID, func(p *meeting.Participant) {
+			p.ScreenSharing = true
+		})
+		room.Broadcast(msg, "")
+		s.broadcastParticipants(room)
+	case meeting.EventScreenStopped:
+		_ = room.UpdateParticipant(sender.UserID, func(p *meeting.Participant) {
+			p.ScreenSharing = false
+		})
+		room.Broadcast(msg, "")
+		s.broadcastParticipants(room)
+	case meeting.EventChatMessage:
+		type chatPayload struct {
+			ID   string `json:"id"`
+			Text string `json:"text"`
+		}
+		var payload chatPayload
+		_ = json.Unmarshal(msg.Data, &payload)
+		payload.Text = strings.TrimSpace(payload.Text)
+		if payload.Text == "" {
+			_ = room.SendTo(sender.UserID, meeting.SignalMessage{
+				Type: meeting.EventError,
+				From: "server",
+				Data: meeting.MustJSON(meeting.ErrorPayload{Message: "chat message is empty"}),
+			})
+			return
+		}
+		if payload.ID == "" {
+			payload.ID = time.Now().UTC().Format("20060102150405.000000000")
+		}
+
+		chatMessage := meeting.ChatMessage{
+			ID:          payload.ID,
+			UserID:      sender.UserID,
+			DisplayName: sender.DisplayName,
+			Text:        payload.Text,
+			SentAt:      time.Now().UTC(),
+		}
+		room.AppendChatMessage(chatMessage)
+		room.Broadcast(meeting.SignalMessage{
+			Type:   meeting.EventChatMessage,
+			RoomID: msg.RoomID,
+			From:   sender.UserID,
+			Data:   meeting.MustJSON(chatMessage),
+		}, "")
 	default:
 		_ = room.SendTo(sender.UserID, meeting.SignalMessage{
 			Type: meeting.EventError,
@@ -252,6 +312,14 @@ func (s *Server) handleSignalMessage(room *meeting.Room, sender meeting.Particip
 			Data: meeting.MustJSON(meeting.ErrorPayload{Message: "unsupported message type"}),
 		})
 	}
+}
+
+func (s *Server) broadcastParticipants(room *meeting.Room) {
+	room.Broadcast(meeting.SignalMessage{
+		Type: meeting.EventParticipants,
+		From: "server",
+		Data: meeting.MustJSON(room.SnapshotParticipants()),
+	}, "")
 }
 
 func (s *Server) staticHandler() http.Handler {
