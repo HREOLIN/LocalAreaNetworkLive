@@ -222,6 +222,13 @@ button:disabled {
   gap: 10px;
 }
 
+.link-help {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+
 .link-row input {
   flex: 1;
 }

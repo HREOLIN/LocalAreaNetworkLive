@@ -259,6 +259,10 @@ func (s *Server) staticHandler() http.Handler {
 	fs := http.FileServer(http.Dir(webDir))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+
 		if isAPIRoute(r.URL.Path) {
 			http.NotFound(w, r)
 			return

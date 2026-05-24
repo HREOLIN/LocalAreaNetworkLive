@@ -15,6 +15,7 @@ const els = {
   shareScreenBtn: document.getElementById("shareScreenBtn"),
   raiseHandBtn: document.getElementById("raiseHandBtn"),
   copyLinkBtn: document.getElementById("copyLinkBtn"),
+  spawnGuestBtn: document.getElementById("spawnGuestBtn"),
   refreshRoomBtn: document.getElementById("refreshRoomBtn"),
   participantList: document.getElementById("participantList"),
   stageVideo: document.getElementById("stageVideo"),
@@ -62,6 +63,7 @@ function boot() {
   bindEvents();
   checkHealth();
   hydrateFromQuery();
+  updateRoomLink();
   updateShareUI();
   renderParticipants();
   renderStage();
@@ -86,10 +88,16 @@ function bindEvents() {
   els.shareScreenBtn.addEventListener("click", toggleScreenShare);
   els.raiseHandBtn.addEventListener("click", toggleHandRaise);
   els.copyLinkBtn.addEventListener("click", copyRoomLink);
+  els.spawnGuestBtn.addEventListener("click", openGuestWindow);
   els.refreshRoomBtn.addEventListener("click", refreshRoom);
   els.clearLogBtn.addEventListener("click", () => {
     els.logOutput.textContent = "";
   });
+
+  els.displayName.addEventListener("input", updateRoomLink);
+  els.userId.addEventListener("input", updateRoomLink);
+  els.roomId.addEventListener("input", updateRoomLink);
+
   window.addEventListener("beforeunload", leaveRoom);
 }
 
@@ -165,6 +173,7 @@ async function createRoom() {
     }
     const room = await response.json();
     els.roomId.value = room.id;
+    updateRoomLink();
     toast(`会议已创建，房间号 ${room.id}`);
     log(`房间已创建: ${room.id}`);
     await joinRoom();
@@ -177,7 +186,7 @@ async function createRoom() {
 async function joinRoom() {
   try {
     if (state.socket) {
-      toast("你已经在会议中");
+      toast("你已经在会议中了");
       return;
     }
 
@@ -230,6 +239,7 @@ async function ensureLocalMedia() {
     toast("未检测到媒体设备，将以无音视频模式加入会议", true);
     log(`本地媒体采集失败，切换为无媒体模式: ${error.message}`);
   }
+
   renderStage();
   return state.localStream;
 }
@@ -347,12 +357,14 @@ function handlePeerLeft(message) {
   if (participant) {
     log(`${participant.displayName} 已离开会议`);
   }
+
   state.participants.delete(payload.userId);
   if (state.activeSharerId === payload.userId) {
     state.activeSharerId = "";
   }
   closePeer(payload.userId);
   removeRemoteTile(payload.userId);
+  state.remoteStreams.delete(payload.userId);
   renderParticipants();
   renderStage();
 }
@@ -417,7 +429,8 @@ function handleScreenShareStarted(message) {
   state.activeSharerId = message.from;
   renderStage();
   const participant = state.participants.get(message.from);
-  log(`${participant ? participant.displayName : payload.displayName || message.from} 开始共享屏幕`);
+  const name = participant ? participant.displayName : payload.displayName || message.from;
+  log(`${name} 开始共享屏幕`);
 }
 
 function handleScreenShareStopped(message) {
@@ -427,12 +440,13 @@ function handleScreenShareStopped(message) {
   }
   renderStage();
   const participant = state.participants.get(message.from);
-  log(`${participant ? participant.displayName : payload.userId || message.from} 停止共享屏幕`);
+  const name = participant ? participant.displayName : payload.userId || message.from;
+  log(`${name} 停止共享屏幕`);
 }
 
 function handleServerError(message) {
   const payload = parsePayload(message.data);
-  toast(payload.message || "服务器返回错误", true);
+  toast(payload.message || "服务端返回错误", true);
   log(`服务端错误: ${payload.message || "unknown error"}`);
 }
 
@@ -483,6 +497,7 @@ async function ensurePeerConnection(userId) {
     log(`与 ${participant ? participant.displayName : userId} 的连接状态: ${pc.connectionState}`);
     if (pc.connectionState === "failed" || pc.connectionState === "closed") {
       removeRemoteTile(userId);
+      state.remoteStreams.delete(userId);
       renderStage();
     }
   });
@@ -579,6 +594,7 @@ function sendSignal(type, { to = "", data = null } = {}) {
 
 function syncMeetingState() {
   els.leaveRoomBtn.disabled = false;
+  els.spawnGuestBtn.disabled = false;
   const hasAudio = state.localStream && state.localStream.getAudioTracks().length > 0;
   const hasVideo = state.localStream && state.localStream.getVideoTracks().length > 0;
   els.toggleAudioBtn.disabled = !hasAudio;
@@ -590,6 +606,7 @@ function syncMeetingState() {
   els.activeRoomId.textContent = state.roomId;
   els.connectionState.textContent = "已连接";
   updateShareUI();
+  updateRoomLink();
   renderStage();
   startRoomPolling();
 }
@@ -634,6 +651,7 @@ function cleanupSocketState() {
   els.shareScreenBtn.disabled = true;
   els.raiseHandBtn.disabled = true;
   els.copyLinkBtn.disabled = true;
+  els.spawnGuestBtn.disabled = true;
   els.refreshRoomBtn.disabled = true;
   els.activeRoomId.textContent = "未加入";
   els.participantCount.textContent = "0";
@@ -654,6 +672,7 @@ async function refreshRoom() {
       state.participants.set(participant.userId, participant);
     }
     renderParticipants();
+    syncRemoteTileLabels();
     renderStage();
     log("已刷新房间成员");
   } catch (error) {
@@ -682,16 +701,16 @@ function updateLocalRole() {
 }
 
 function updateRoomLink() {
-  if (!state.roomId) {
+  const roomId = state.roomId || els.roomId.value.trim();
+  if (!roomId) {
     els.roomLink.value = "尚未生成";
     return;
   }
-  const url = new URL(window.location.href);
-  url.searchParams.set("roomId", state.roomId);
-  url.searchParams.set("name", els.displayName.value.trim());
-  url.searchParams.set("userId", els.userId.value.trim());
-  url.searchParams.set("autoJoin", "1");
-  els.roomLink.value = url.toString();
+  els.roomLink.value = buildGuestURL({
+    roomId,
+    name: els.displayName.value.trim() || "会议成员",
+    userId: els.userId.value.trim() || `user-${crypto.randomUUID().slice(0, 8)}`,
+  });
 }
 
 async function copyRoomLink() {
@@ -700,6 +719,45 @@ async function copyRoomLink() {
   }
   await navigator.clipboard.writeText(els.roomLink.value);
   toast("会议链接已复制");
+}
+
+function openGuestWindow() {
+  const roomId = state.roomId || els.roomId.value.trim();
+  if (!roomId) {
+    toast("请先创建或加入会议", true);
+    return;
+  }
+
+  const suffix = Math.floor(Math.random() * 900 + 100);
+  const url = buildGuestURL({
+    roomId,
+    name: `测试成员${suffix}`,
+    userId: `guest-${crypto.randomUUID().slice(0, 8)}`,
+  });
+  const popup = window.open(url, "_blank", "noopener,noreferrer");
+  if (!popup) {
+    navigator.clipboard
+      .writeText(url)
+      .then(() => {
+        toast("浏览器拦截了新窗口，测试分身链接已复制");
+      })
+      .catch(() => {
+        toast("浏览器拦截了新窗口，请手动复制会议链接打开", true);
+      });
+    log(`浏览器拦截了测试分身窗口: ${url}`);
+    return;
+  }
+  toast("测试分身已在新标签页打开");
+  log("已打开测试分身页面");
+}
+
+function buildGuestURL({ roomId, name, userId }) {
+  const url = new URL(window.location.origin);
+  url.searchParams.set("roomId", roomId);
+  url.searchParams.set("name", name);
+  url.searchParams.set("userId", userId);
+  url.searchParams.set("autoJoin", "1");
+  return url.toString();
 }
 
 function renderParticipants() {
@@ -750,18 +808,42 @@ function upsertRemoteTile(userId, stream) {
     tile.id = `remote-${userId}`;
     tile.innerHTML = `
       <div class="tile-head">
-        <span>${escapeHTML(participant ? participant.displayName : userId)}</span>
-        <span class="mini-tag">${
-          participant && participant.role === "host" ? "主持人" : "远端"
-        }</span>
+        <span class="remote-name"></span>
+        <span class="mini-tag remote-role"></span>
       </div>
       <video autoplay playsinline></video>
-      <div class="tile-meta">${escapeHTML(participant ? participant.userId : userId)}</div>
+      <div class="tile-meta remote-id"></div>
     `;
     els.videoGrid.appendChild(tile);
   }
-  const video = tile.querySelector("video");
-  video.srcObject = stream;
+
+  tile.querySelector(".remote-name").textContent = participant ? participant.displayName : userId;
+  tile.querySelector(".remote-role").textContent =
+    participant && participant.role === "host" ? "主持人" : "远端";
+  tile.querySelector(".remote-id").textContent = participant ? participant.userId : userId;
+  tile.querySelector("video").srcObject = stream;
+}
+
+function syncRemoteTileLabels() {
+  for (const tile of Array.from(els.videoGrid.querySelectorAll(".video-tile.remote"))) {
+    const userId = tile.id.replace("remote-", "");
+    const participant = state.participants.get(userId);
+    if (!participant) {
+      continue;
+    }
+    const nameEl = tile.querySelector(".remote-name");
+    const roleEl = tile.querySelector(".remote-role");
+    const idEl = tile.querySelector(".remote-id");
+    if (nameEl) {
+      nameEl.textContent = participant.displayName;
+    }
+    if (roleEl) {
+      roleEl.textContent = participant.role === "host" ? "主持人" : "远端";
+    }
+    if (idEl) {
+      idEl.textContent = participant.userId;
+    }
+  }
 }
 
 function removeRemoteTile(userId) {
@@ -787,7 +869,7 @@ function toggleAudio() {
   }
   const enabled = toggleTracks(targetStream.getAudioTracks());
   els.toggleAudioBtn.textContent = enabled ? "关闭麦克风" : "打开麦克风";
-  els.localMeta.textContent = trackSummary(state.localStream);
+  els.localMeta.textContent = localMetaText();
   sendMuteChanged();
 }
 
@@ -798,7 +880,7 @@ function toggleVideo() {
   }
   const enabled = toggleTracks(targetStream.getVideoTracks());
   els.toggleVideoBtn.textContent = enabled ? "关闭摄像头" : "打开摄像头";
-  els.localMeta.textContent = trackSummary(state.localStream);
+  els.localMeta.textContent = localMetaText();
   sendMuteChanged();
   renderStage();
 }
@@ -843,7 +925,7 @@ async function startScreenShare(screenStream) {
 
   state.localStream = new MediaStream([...audioTracks, screenVideoTrack]);
   els.localVideo.srcObject = state.localStream;
-  els.localMeta.textContent = `正在共享桌面 / ${trackSummary(state.localStream)}`;
+  els.localMeta.textContent = localMetaText();
   els.toggleVideoBtn.textContent = "停止画面";
 
   screenVideoTrack.addEventListener("ended", () => {
@@ -854,6 +936,7 @@ async function startScreenShare(screenStream) {
     videoTrack: screenVideoTrack,
     audioTrack: audioTracks[0] || null,
   });
+  await renegotiateAllPeers("screen-started");
 
   updateShareUI();
   renderStage();
@@ -873,11 +956,11 @@ async function stopScreenShare() {
     return;
   }
 
-  stopScreenStreamOnly();
   state.isScreenSharing = false;
   if (state.localParticipant && state.activeSharerId === state.localParticipant.userId) {
     state.activeSharerId = "";
   }
+  stopScreenStreamOnly();
 
   const fallback =
     state.cameraStream && state.cameraStream.getTracks().length > 0
@@ -885,7 +968,7 @@ async function stopScreenShare() {
       : new MediaStream();
   state.localStream = fallback;
   els.localVideo.srcObject = fallback.getTracks().length > 0 ? fallback : null;
-  els.localMeta.textContent = trackSummary(fallback);
+  els.localMeta.textContent = localMetaText();
   els.toggleVideoBtn.textContent = "关闭摄像头";
 
   const nextVideo = fallback.getVideoTracks()[0] || null;
@@ -894,6 +977,7 @@ async function stopScreenShare() {
     videoTrack: nextVideo,
     audioTrack: nextAudio,
   });
+  await renegotiateAllPeers("screen-stopped");
 
   updateShareUI();
   renderStage();
@@ -939,6 +1023,31 @@ async function replaceOutgoingTracks({ videoTrack, audioTrack }) {
   await Promise.all(tasks);
 }
 
+async function renegotiateAllPeers(reason) {
+  const tasks = [];
+  for (const [userId, peer] of state.peers.entries()) {
+    tasks.push(renegotiatePeer(userId, peer, reason));
+  }
+  await Promise.all(tasks);
+}
+
+async function renegotiatePeer(userId, pc, reason) {
+  if (!state.socket || state.socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  if (pc.signalingState !== "stable") {
+    log(`跳过与 ${userId} 的重新协商，当前状态 ${pc.signalingState}`);
+    return;
+  }
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  sendSignal("offer", {
+    to: userId,
+    data: pc.localDescription,
+  });
+  log(`已向 ${userId} 发送重新协商 offer（${reason}）`);
+}
+
 function toggleTracks(tracks) {
   if (!tracks.length) {
     return false;
@@ -961,6 +1070,7 @@ function sendMuteChanged() {
         ? true
         : state.localStream.getVideoTracks().every((track) => !track.enabled),
   };
+
   if (state.localParticipant) {
     const updated = { ...state.localParticipant, ...payload };
     state.localParticipant = updated;
@@ -968,6 +1078,7 @@ function sendMuteChanged() {
     renderParticipants();
     renderStage();
   }
+
   sendSignal("mute-changed", { data: payload });
 }
 
@@ -1023,13 +1134,23 @@ function pickStageSource() {
       const participant = state.participants.get(state.activeSharerId);
       return {
         stream: sharedStream,
-        title: participant ? `${participant.displayName} 的共享` : "共享屏幕",
+        title: participant ? `${participant.displayName} 的共享画面` : "共享屏幕",
         meta: "当前显示共享中的桌面",
         mode: "共享屏幕",
         hint: "其他成员画面保留在画廊中",
         excludeUserId: state.activeSharerId,
       };
     }
+
+    const participant = state.participants.get(state.activeSharerId);
+    return {
+      stream: null,
+      title: participant ? `${participant.displayName} 正在共享` : "共享屏幕",
+      meta: "已收到共享通知，正在等待屏幕流到达",
+      mode: "缓冲中",
+      hint: "屏幕流一旦协商完成，会优先显示在主舞台",
+      excludeUserId: "",
+    };
   }
 
   const host = Array.from(state.participants.values()).find((participant) => participant.role === "host");
@@ -1066,9 +1187,9 @@ function pickStageSource() {
   return {
     stream: null,
     title: "主舞台",
-    meta: "等待房主开启摄像头或共享屏幕",
+    meta: "等待房主开启画面或共享屏幕",
     mode: "待机",
-    hint: "当成员开启视频或共享屏幕后，画面会自动显示在这里",
+    hint: "成员开启视频或共享屏幕后，画面会自动显示在这里",
     excludeUserId: "",
   };
 }
@@ -1092,7 +1213,7 @@ function renderGallery(excludeUserId) {
     }
     empty.textContent = state.roomId
       ? "其他成员的画面会显示在这里。"
-      : "加入会议后，成员画廊会显示其他参会者的画面。";
+      : "加入会议后，这里会显示其他参会者的画面。";
     return;
   }
 
@@ -1105,8 +1226,15 @@ function canShareScreen() {
   return !!(navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === "function");
 }
 
+function localMetaText() {
+  if (state.isScreenSharing) {
+    return `正在共享桌面 / ${trackSummary(state.localStream)}`;
+  }
+  return trackSummary(state.localStream);
+}
+
 function trackSummary(stream) {
-  if (!stream.getAudioTracks().length && !stream.getVideoTracks().length) {
+  if (!stream || (!stream.getAudioTracks().length && !stream.getVideoTracks().length)) {
     return "无可用音视频设备";
   }
   const audioOn = stream.getAudioTracks().some((track) => track.enabled);

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>LAN Meeting</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=20260524-2" />
   </head>
   <body>
     <div class="page-shell">
@@ -13,7 +13,7 @@
           <p class="eyebrow">LAN MEETING</p>
           <h1>局域网会议控制台</h1>
           <p class="hero-copy">
-            面向内网场景的轻量会议页。支持创建会议、加入房间、浏览器音视频采集和
+            面向内网场景的轻量会议页，支持创建会议、加入房间、浏览器音视频采集、桌面共享和
             WebRTC 点对点协商。
           </p>
         </div>
@@ -51,7 +51,12 @@
             </label>
             <label class="field field-wide">
               <span>房间 ID</span>
-              <input id="roomId" type="text" placeholder="输入已有房间号加入会议" maxlength="32" />
+              <input
+                id="roomId"
+                type="text"
+                placeholder="输入已有房间号即可加入会议"
+                maxlength="32"
+              />
             </label>
           </div>
 
@@ -73,7 +78,9 @@
             <div class="link-row">
               <input id="roomLink" type="text" readonly value="尚未生成" />
               <button id="copyLinkBtn" class="secondary" disabled>复制</button>
+              <button id="spawnGuestBtn" class="ghost" disabled>打开测试分身</button>
             </div>
+            <p class="link-help">同一台电脑可直接打开一个自动入会的新标签页，用来模拟另一位成员。</p>
           </div>
 
           <div id="toast" class="toast" aria-live="polite"></div>
@@ -96,7 +103,7 @@
             <div class="tile-head stage-head">
               <div>
                 <span id="stageTitle">主舞台</span>
-                <div id="stageMeta" class="tile-meta light">等待房主开启画面</div>
+                <div id="stageMeta" class="tile-meta light">等待房主开启画面或共享屏幕</div>
               </div>
               <span id="stageModeTag" class="mini-tag">待机</span>
             </div>
@@ -134,6 +141,6 @@
       </main>
     </div>
 
-    <script src="/app.js" defer></script>
+    <script src="/app.js?v=20260524-2" defer></script>
   </body>
 </html>
